@@ -205,10 +205,11 @@ class LoadBalancer:
     def run_cpu_based(self, num_tasks, task_duration, interval=10):
         """
         CPU-based load balancing: submit tasks with interval, assign to lowest CPU worker
+        Strategy: Prefer idle workers, then select by lowest CPU load
         """
         print("\n### CPU-BASED LOAD BALANCING ###")
         print(f"Submitting {num_tasks} tasks with {interval}s interval")
-        print("Strategy: Assign to worker with lowest CPU load at submission time\n")
+        print("Strategy: Prefer idle workers, then select by CPU load\n")
         
         self.completed_tasks = []
         threads = []
@@ -216,28 +217,37 @@ class LoadBalancer:
         for i in range(num_tasks):
             task_id = f"CPU_TASK_{i+1}"
             
-            # Find worker with lowest CPU load
-            best_worker = None
-            lowest_cpu = float('inf')
+            # Step 1: Find idle workers
+            idle_workers = [w for w in self.workers if not w.is_busy()]
             
-            for worker in self.workers:
-                if not worker.is_busy():
+            if idle_workers:
+                # Among idle workers, select the one with lowest CPU
+                best_worker = None
+                lowest_cpu = float('inf')
+                
+                for worker in idle_workers:
                     status = worker.get_status()
                     if status and status['cpu_load'] < lowest_cpu:
                         lowest_cpu = status['cpu_load']
                         best_worker = worker
-            
-            # If all workers busy, select one with lowest CPU anyway
-            if not best_worker:
+                
+                print(f"[Submit {i+1}/{num_tasks}] {task_id} -> {best_worker.worker_id} "
+                      f"(CPU: {lowest_cpu:.4f}, IDLE)")
+            else:
+                # All workers busy, select one with lowest CPU load
+                best_worker = None
+                lowest_cpu = float('inf')
+                
                 for worker in self.workers:
                     status = worker.get_status()
                     if status and status['cpu_load'] < lowest_cpu:
                         lowest_cpu = status['cpu_load']
                         best_worker = worker
+                
+                print(f"[Submit {i+1}/{num_tasks}] {task_id} -> {best_worker.worker_id} "
+                      f"(CPU: {lowest_cpu:.4f}, BUSY-queued)")
             
             if best_worker:
-                print(f"[Submit {i+1}/{num_tasks}] {task_id} -> {best_worker.worker_id} (CPU: {lowest_cpu:.4f})")
-                
                 # Start task in separate thread
                 t = threading.Thread(
                     target=self._execute_task,
@@ -249,6 +259,9 @@ class LoadBalancer:
                 
                 with self.threads_lock:
                     self.active_threads = threads
+                
+                # Small delay to let worker state update
+                time.sleep(0.1)
             
             # Wait interval before next submission (except last one)
             if i < num_tasks - 1:
