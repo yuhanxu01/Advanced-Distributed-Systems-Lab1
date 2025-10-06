@@ -1,87 +1,59 @@
-# Advanced-Distributed-Systems-Lab1
-
+# Advanced Distributed Systems - Lab 1
 ## Resource Monitoring and Load Balancing System
 
-A distributed system with one manager and multiple workers that monitors resources and intelligently assigns tasks using CPU-based load balancing.
+Distributed system with intelligent load balancing: one manager monitors multiple workers and assigns tasks based on CPU usage.
 
 ---
 
-## Quick Start
+## How to Run
 
-### 1. Clone Repository
-```bash
-git clone https://github.com/yuhanxu01/Advanced-Distributed-Systems-Lab1.git
-cd Advanced-Distributed-Systems-Lab1
-```
-
-### 2. Start Workers (on each worker node)
+### Start Workers
 ```bash
 python3 worker.py
 ```
-**What it does:** Starts RPC server, provides resource monitoring APIs, executes PI calculation tasks.
 
-### 3. Configure Manager
-Edit `manager.py` and update worker IPs:
-```python
-worker_configs = [
-    ('worker1', '10.128.0.2'),  # Update with your actual internal IPs
-    ('worker2', '10.128.0.3'),
-    ('worker3', '10.128.0.4'),
-    ('worker4', '10.128.0.6'),
-]
-```
-
-### 4. Run Manager (on manager node)
+### Run Manager
 ```bash
 python3 manager.py
 ```
-**What it does:** 
-- Monitors worker resources every 5 seconds
-- Assigns 20 tasks using CPU-based algorithm
-- Assigns 20 tasks using Round-robin algorithm
-- Generates comparison report: `experiment_report.json`
 
-### 5. Test Concurrent Clients (optional)
+### Test Concurrent Clients (optional)
 ```bash
 python3 test_concurrent.py
 ```
-**What it does:** Simulates 3 clients submitting tasks simultaneously.
 
 ---
 
-## Configuration Parameters
+## What Each Component Does
 
-In `manager.py` → `run_experiment()`:
-- `num_tasks`: Number of tasks (default: 20)
-- `interval`: Seconds between submissions (default: 10)
-- `task_duration`: Task runtime in seconds (default: 300 = 5 minutes)
+### **worker.py**
+- Runs RPC server (multi-threaded for concurrent requests)
+- Monitors CPU load and memory usage
+- Executes computational tasks (Ramanujan PI calculation)
+- Reports idle status when CPU < 5% and no active task
 
----
+### **manager.py**
+- Monitors all workers every 5 seconds
+- Assigns tasks using two algorithms:
+  - **CPU-based:** Selects worker with lowest CPU load
+  - **Round-robin:** Distributes tasks evenly
+- Runs experiment with 20 tasks per algorithm
+- Generates comparison report (`experiment_report.json`)
 
-## System Architecture
-
-```
-Manager (node0)
-  ├── Monitors workers (CPU, memory, idle status)
-  ├── CPU-based load balancing (selects lowest CPU)
-  └── Round-robin load balancing (equal distribution)
-
-Workers (node1-4)
-  ├── RPC server (multi-threaded)
-  ├── Resource monitoring (CPU/memory)
-  └── Task execution (Ramanujan PI calculation)
-```
+### **test_concurrent.py**
+- Simulates 3 clients submitting tasks simultaneously
+- Tests concurrent request handling
 
 ---
 
-## Requirements
-- Python 3.6+
-- Linux environment (`/proc` filesystem)
-- Network connectivity between nodes
-- Port 17000 open
+## Key Features
+✅ Real-time resource monitoring  
+✅ RPC-based communication (not raw sockets)  
+✅ Multi-threaded concurrent task handling  
+✅ Intelligent CPU-based load balancing  
+✅ Idle worker detection  
+✅ Load balancing algorithm comparison
 
 ---
 
-## Author
-**Course:** CISC 6935 Distributed Systems  
-**Lab:** Resource Monitoring and Load Balancing
+**Course:** CISC 6935 Distributed Systems
