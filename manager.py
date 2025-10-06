@@ -183,7 +183,7 @@ class LoadBalancer:
 
         for i in range(num_tasks):
             task_id = f"PI_TASK_{i+1}"
-            duration = random.randint(20, 30)  # simulate compute time
+            duration = random.randint(5, 40)  # simulate compute time
             # pick least busy worker
             idle_workers = [w for w in self.workers if not w.is_busy()]
             if not idle_workers:
@@ -215,7 +215,7 @@ class LoadBalancer:
         for i in range(num_tasks):
             worker = self.workers[i % len(self.workers)]
             task_id = f"RR_TASK_{i+1}"
-            task_dur = random.randint(20, 30)
+            task_dur = random.randint(5, 40)
             t = threading.Thread(
                 target=self._execute_task,
                 args=(worker, task_id, task_dur, 'round_robin')
