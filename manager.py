@@ -224,7 +224,8 @@ class LoadBalancer:
             t.start()
             threads.append(t)
             print(f"[Assign] {task_id} -> {worker.worker_id} ({task_dur}s)")
-            time.sleep(1)
+            print(f"[Assign] {task_id} -> {worker.worker_id} ({task_dur}s)")
+            time.sleep(interval)
 
         for t in threads:
             t.join()
