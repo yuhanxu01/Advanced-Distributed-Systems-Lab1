@@ -44,10 +44,10 @@ def get_memory_status(path='/proc/meminfo'):
 current_task = None
 task_lock = threading.Lock()
 
-def calculate_pi_ramanujan(duration_seconds=300):
+def calculate_pi_ramanujan(duration_seconds=30):
     """
     Calculate PI using Ramanujan's formula
-    Runs for specified duration (default 5 minutes)
+    Runs for specified duration (default 1 minutes)
     
     Ramanujan formula:
     1/π = (2√2/9801) * Σ[(4k)!(1103+26390k)] / [(k!)^4 * 396^(4k)]
@@ -96,15 +96,15 @@ def get_resource_status():
     memory = get_memory_status()
     
     # Calculate CPU usage percentage (simplified)
-    # Load average < 0.05 indicates very low usage
+    # Load average < 0.1 indicates very low usage
     cpu_usage = cpu['lavg_1']  # 1-minute load average
     
     # Check if worker is idle
-    # Idle: CPU < 5% (load < 0.05) AND no current task
+    # Idle: CPU < 10% (load < 0.1) AND no current task
     with task_lock:
         has_task = current_task is not None
     
-    is_idle = (cpu_usage < 0.05) and (not has_task)
+    is_idle = (cpu_usage < 0.1) and (not has_task)
     
     return {
         'cpu_load': cpu_usage,
@@ -126,7 +126,7 @@ def execute_task(task_params):
     global current_task
     
     task_id = task_params.get('task_id', 'unknown')
-    duration = task_params.get('duration', 300)  # Default 5 minutes
+    duration = task_params.get('duration', 30)  # Default 1 minutes
     
     print(f"[Worker] Starting task {task_id} for {duration} seconds")
     
