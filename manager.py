@@ -1,7 +1,7 @@
 # -*- coding:utf-8 -*-
 """
 CISC 6935 Distributed Systems - Lab 1
-Manager Node Implementation
+Manager Node Implementation - Fixed Version
 Monitors workers and assigns tasks using intelligent load balancing
 """
 
@@ -18,14 +18,19 @@ class RPCProxy:
     """
     def __init__(self, connection):
         self._connection = connection
+        self._lock = threading.Lock()  # Add lock for thread safety
         
     def __getattr__(self, name):
         def do_rpc(*args, **kwargs):
-            self._connection.send(pickle.dumps((name, args, kwargs)))
-            result = pickle.loads(self._connection.recv())
-            if isinstance(result, Exception):
-                raise result
-            return result
+            with self._lock:  # Ensure thread-safe communication
+                try:
+                    self._connection.send(pickle.dumps((name, args, kwargs)))
+                    result = pickle.loads(self._connection.recv())
+                    if isinstance(result, Exception):
+                        raise result
+                    return result
+                except (EOFError, ConnectionResetError, BrokenPipeError) as e:
+                    raise ConnectionError(f"Connection lost: {str(e)}")
         return do_rpc
 
 class WorkerProxy:
@@ -39,12 +44,13 @@ class WorkerProxy:
         self.proxy = None
         self.last_status = None
         self.is_connected = False
+        self._connection = None
         
     def connect(self):
         """Establish RPC connection to worker"""
         try:
-            conn = Client((self.host, self.port), authkey=b'peekaboo')
-            self.proxy = RPCProxy(conn)
+            self._connection = Client((self.host, self.port), authkey=b'peekaboo')
+            self.proxy = RPCProxy(self._connection)
             self.is_connected = True
             print(f"[Manager] Connected to worker {self.worker_id} at {self.host}")
             return True
@@ -52,6 +58,16 @@ class WorkerProxy:
             print(f"[Manager] Failed to connect to worker {self.worker_id}: {str(e)}")
             self.is_connected = False
             return False
+    
+    def reconnect(self):
+        """Attempt to reconnect to worker"""
+        print(f"[Manager] Attempting to reconnect to worker {self.worker_id}...")
+        if self._connection:
+            try:
+                self._connection.close()
+            except:
+                pass
+        return self.connect()
     
     def get_status(self):
         """Get current resource status from worker"""
@@ -61,6 +77,18 @@ class WorkerProxy:
             status = self.proxy.get_resource_status()
             self.last_status = status
             return status
+        except ConnectionError as e:
+            print(f"[Manager] Connection error with worker {self.worker_id}: {str(e)}")
+            self.is_connected = False
+            # Try to reconnect
+            if self.reconnect():
+                try:
+                    status = self.proxy.get_resource_status()
+                    self.last_status = status
+                    return status
+                except:
+                    return None
+            return None
         except Exception as e:
             print(f"[Manager] Error getting status from worker {self.worker_id}: {str(e)}")
             self.is_connected = False
@@ -69,10 +97,17 @@ class WorkerProxy:
     def assign_task(self, task_params):
         """Assign a task to this worker"""
         if not self.is_connected:
-            return {'status': 'error', 'error': 'not connected'}
+            # Try to reconnect before giving up
+            if not self.reconnect():
+                return {'status': 'error', 'error': 'not connected'}
+        
         try:
             result = self.proxy.execute_task(task_params)
             return result
+        except ConnectionError as e:
+            print(f"[Manager] Connection lost during task assignment to worker {self.worker_id}")
+            self.is_connected = False
+            return {'status': 'error', 'error': 'connection lost'}
         except Exception as e:
             print(f"[Manager] Error assigning task to worker {self.worker_id}: {str(e)}")
             return {'status': 'error', 'error': str(e)}
@@ -108,6 +143,7 @@ class LoadBalancer:
         for worker in self.workers:
             if worker.connect():
                 success_count += 1
+            time.sleep(0.5)  # Small delay between connections
         print(f"[Manager] Successfully connected to {success_count}/{len(self.workers)} workers")
         return success_count > 0
     
@@ -250,7 +286,10 @@ class LoadBalancer:
             result = worker.assign_task(task_params)
             assignment['completed_at'] = time.time()
             assignment['result'] = result
-            print(f"[Manager] Task {task_id} completed on worker {worker.worker_id}")
+            if result.get('status') != 'error':
+                print(f"[Manager] Task {task_id} completed on worker {worker.worker_id}")
+            else:
+                print(f"[Manager] Task {task_id} failed on worker {worker.worker_id}: {result.get('error')}")
         
         t = threading.Thread(target=async_assign)
         t.daemon = True
@@ -373,10 +412,6 @@ def main():
     time.sleep(10)
     
     # Run experiment
-    # Modify these parameters as needed:
-    # - num_tasks: number of tasks (default 20)
-    # - interval: seconds between tasks (default 10)
-    # - task_duration: how long each task runs (default 300 = 5 min)
     lb.run_experiment(num_tasks=20, interval=10, task_duration=300)
     
     # Stop monitoring
