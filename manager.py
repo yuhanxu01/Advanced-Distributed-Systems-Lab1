@@ -202,88 +202,78 @@ class LoadBalancer:
             with worker.task_lock:
                 worker.current_task = None
     
-    def run_cpu_based(self, num_tasks, task_duration, interval=10):
+    def run_cpu_based(self, num_tasks, task_duration):
         """
-        CPU-based load balancing: submit tasks with interval, assign to lowest CPU worker
-        Strategy: Prefer idle workers, then select by lowest CPU load
+        CPU-based load balancing: submit all tasks immediately, assign to workers dynamically
+        Strategy: Continuously assign tasks to idle workers with lowest CPU load
         """
         print("\n### CPU-BASED LOAD BALANCING ###")
-        print(f"Submitting {num_tasks} tasks with {interval}s interval")
-        print("Strategy: Prefer idle workers, then select by CPU load\n")
+        print(f"Submitting {num_tasks} tasks (each runs {task_duration}s)")
+        print("Strategy: Assign to idle worker with lowest CPU load\n")
         
         self.completed_tasks = []
+        task_queue = deque([(f"CPU_TASK_{i+1}", task_duration) for i in range(num_tasks)])
         threads = []
         
-        for i in range(num_tasks):
-            task_id = f"CPU_TASK_{i+1}"
+        print(f"[Manager] All {num_tasks} tasks queued, starting assignment...\n")
+        
+        # Continuously assign tasks until queue is empty
+        while task_queue or any(t.is_alive() for t in threads):
+            if task_queue:
+                # Find idle workers
+                idle_workers = [w for w in self.workers if not w.is_busy()]
+                
+                if idle_workers:
+                    # Select idle worker with lowest CPU
+                    best_worker = None
+                    lowest_cpu = float('inf')
+                    
+                    for worker in idle_workers:
+                        status = worker.get_status()
+                        if status and status['cpu_load'] < lowest_cpu:
+                            lowest_cpu = status['cpu_load']
+                            best_worker = worker
+                    
+                    if best_worker:
+                        task_id, duration = task_queue.popleft()
+                        print(f"[Assign] {task_id} -> {best_worker.worker_id} "
+                              f"(CPU: {lowest_cpu:.4f}) | Queue: {len(task_queue)} remaining")
+                        
+                        # Start task in separate thread
+                        t = threading.Thread(
+                            target=self._execute_task,
+                            args=(best_worker, task_id, duration, 'cpu_based')
+                        )
+                        t.daemon = True
+                        t.start()
+                        threads.append(t)
+                        
+                        with self.threads_lock:
+                            self.active_threads = threads
             
-            # Step 1: Find idle workers
-            idle_workers = [w for w in self.workers if not w.is_busy()]
-            
-            if idle_workers:
-                # Among idle workers, select the one with lowest CPU
-                best_worker = None
-                lowest_cpu = float('inf')
-                
-                for worker in idle_workers:
-                    status = worker.get_status()
-                    if status and status['cpu_load'] < lowest_cpu:
-                        lowest_cpu = status['cpu_load']
-                        best_worker = worker
-                
-                print(f"[Submit {i+1}/{num_tasks}] {task_id} -> {best_worker.worker_id} "
-                      f"(CPU: {lowest_cpu:.4f}, IDLE)")
-            else:
-                # All workers busy, select one with lowest CPU load
-                best_worker = None
-                lowest_cpu = float('inf')
-                
-                for worker in self.workers:
-                    status = worker.get_status()
-                    if status and status['cpu_load'] < lowest_cpu:
-                        lowest_cpu = status['cpu_load']
-                        best_worker = worker
-                
-                print(f"[Submit {i+1}/{num_tasks}] {task_id} -> {best_worker.worker_id} "
-                      f"(CPU: {lowest_cpu:.4f}, BUSY-queued)")
-            
-            if best_worker:
-                # Start task in separate thread
-                t = threading.Thread(
-                    target=self._execute_task,
-                    args=(best_worker, task_id, task_duration, 'cpu_based')
-                )
-                t.daemon = True
-                t.start()
-                threads.append(t)
-                
-                with self.threads_lock:
-                    self.active_threads = threads
-                
-                # Small delay to let worker state update
-                time.sleep(0.1)
-            
-            # Wait interval before next submission (except last one)
-            if i < num_tasks - 1:
-                time.sleep(interval)
+            # Check every 0.5 seconds for idle workers
+            time.sleep(0.5)
         
         # Wait for all tasks to complete
-        print(f"\n[Manager] Waiting for all {num_tasks} CPU-based tasks to complete...")
+        print(f"\n[Manager] All tasks assigned, waiting for completion...")
         for t in threads:
             t.join()
         
         return self.completed_tasks.copy()
     
-    def run_round_robin(self, num_tasks, task_duration, interval=10):
+    def run_round_robin(self, num_tasks, task_duration):
         """
-        Round-robin load balancing: submit tasks with interval, assign in round-robin order
+        Round-robin load balancing: assign tasks in sequential order to workers
+        Strategy: Distribute tasks evenly across workers in round-robin fashion
         """
         print("\n### ROUND-ROBIN LOAD BALANCING ###")
-        print(f"Submitting {num_tasks} tasks with {interval}s interval")
-        print("Strategy: Assign to workers in sequential order\n")
+        print(f"Submitting {num_tasks} tasks (each runs {task_duration}s)")
+        print("Strategy: Assign to workers in sequential round-robin order\n")
         
         self.completed_tasks = []
         threads = []
+        
+        print(f"[Manager] Assigning {num_tasks} tasks in round-robin order...\n")
         
         for i in range(num_tasks):
             task_id = f"RR_TASK_{i+1}"
@@ -291,7 +281,7 @@ class LoadBalancer:
             # Round-robin: cycle through workers
             worker = self.workers[i % len(self.workers)]
             
-            print(f"[Submit {i+1}/{num_tasks}] {task_id} -> {worker.worker_id} (round-robin)")
+            print(f"[Assign] {task_id} -> {worker.worker_id} (position {i % len(self.workers)})")
             
             # Start task in separate thread
             t = threading.Thread(
@@ -304,38 +294,33 @@ class LoadBalancer:
             
             with self.threads_lock:
                 self.active_threads = threads
-            
-            # Wait interval before next submission (except last one)
-            if i < num_tasks - 1:
-                time.sleep(interval)
         
         # Wait for all tasks to complete
-        print(f"\n[Manager] Waiting for all {num_tasks} round-robin tasks to complete...")
+        print(f"\n[Manager] All tasks assigned, waiting for completion...")
         for t in threads:
             t.join()
         
         return self.completed_tasks.copy()
     
-    def run_experiment(self, num_tasks=20, task_duration=10, interval=10):
+    def run_experiment(self, num_tasks=20, task_duration=10):
         """
         Run load balancing experiment
         Args:
             num_tasks: number of tasks (default 20)
             task_duration: duration of each task in seconds (default 10)
-            interval: seconds between task submissions (default 10)
         """
         print("\n" + "="*70)
         print("LOAD BALANCING EXPERIMENT")
         print("="*70)
         print(f"Total Tasks: {num_tasks}")
         print(f"Task Duration: {task_duration}s each")
-        print(f"Submission Interval: {interval}s")
         print(f"Workers: {len(self.workers)}")
+        print(f"Theoretical Best Time: {num_tasks * task_duration / len(self.workers):.0f}s")
         print("="*70 + "\n")
         
         # Test 1: CPU-based algorithm
         exp_start = time.time()
-        cpu_results = self.run_cpu_based(num_tasks, task_duration, interval)
+        cpu_results = self.run_cpu_based(num_tasks, task_duration)
         cpu_duration = time.time() - exp_start
         
         print(f"\n[Result] CPU-based completed in {cpu_duration:.1f}s\n")
@@ -346,25 +331,28 @@ class LoadBalancer:
         
         # Test 2: Round-robin algorithm
         exp_start = time.time()
-        rr_results = self.run_round_robin(num_tasks, task_duration, interval)
+        rr_results = self.run_round_robin(num_tasks, task_duration)
         rr_duration = time.time() - exp_start
         
         print(f"\n[Result] Round-robin completed in {rr_duration:.1f}s\n")
         
         # Generate comparison report
         self._generate_report(cpu_results, rr_results, cpu_duration, rr_duration, 
-                            num_tasks, task_duration, interval)
+                            num_tasks, task_duration)
     
     def _generate_report(self, cpu_results, rr_results, cpu_duration, rr_duration,
-                        num_tasks, task_duration, interval):
+                        num_tasks, task_duration):
         """Generate detailed comparison report"""
         print("\n" + "="*70)
         print("EXPERIMENT RESULTS")
         print("="*70)
         
+        theoretical_time = num_tasks * task_duration / len(self.workers)
+        
         # Analyze CPU-based distribution
         print("\n### CPU-Based Algorithm ###")
         print(f"Total Time: {cpu_duration:.1f}s")
+        print(f"Efficiency: {theoretical_time / cpu_duration * 100:.1f}%")
         cpu_dist = {}
         for record in cpu_results:
             wid = record['worker_id']
@@ -377,6 +365,7 @@ class LoadBalancer:
         # Analyze Round-robin distribution
         print("\n### Round-Robin Algorithm ###")
         print(f"Total Time: {rr_duration:.1f}s")
+        print(f"Efficiency: {theoretical_time / rr_duration * 100:.1f}%")
         rr_dist = {}
         for record in rr_results:
             wid = record['worker_id']
@@ -388,32 +377,35 @@ class LoadBalancer:
         
         # Performance comparison
         print("\n### Performance Comparison ###")
-        print(f"CPU-based total time: {cpu_duration:.1f}s")
-        print(f"Round-robin total time: {rr_duration:.1f}s")
+        print(f"Theoretical Best: {theoretical_time:.1f}s")
+        print(f"CPU-based: {cpu_duration:.1f}s ({theoretical_time / cpu_duration * 100:.1f}% efficiency)")
+        print(f"Round-robin: {rr_duration:.1f}s ({theoretical_time / rr_duration * 100:.1f}% efficiency)")
         
         diff = cpu_duration - rr_duration
         if abs(diff) < 1:
-            print(f"Performance is similar (difference: {abs(diff):.1f}s)")
+            print(f"\nPerformance is similar (difference: {abs(diff):.1f}s)")
         elif diff > 0:
-            print(f"Round-robin is {diff:.1f}s faster ({diff/cpu_duration*100:.1f}% improvement)")
+            print(f"\nRound-robin is {diff:.1f}s faster ({diff/cpu_duration*100:.1f}% improvement)")
         else:
-            print(f"CPU-based is {abs(diff):.1f}s faster ({abs(diff)/rr_duration*100:.1f}% improvement)")
+            print(f"\nCPU-based is {abs(diff):.1f}s faster ({abs(diff)/rr_duration*100:.1f}% improvement)")
         
         # Save detailed report
         report = {
             'experiment_info': {
                 'total_tasks': num_tasks,
                 'task_duration': task_duration,
-                'submission_interval': interval,
-                'workers': len(self.workers)
+                'workers': len(self.workers),
+                'theoretical_best_time': theoretical_time
             },
             'cpu_based': {
                 'duration': cpu_duration,
+                'efficiency': theoretical_time / cpu_duration * 100,
                 'distribution': cpu_dist,
                 'tasks': cpu_results
             },
             'round_robin': {
                 'duration': rr_duration,
+                'efficiency': theoretical_time / rr_duration * 100,
                 'distribution': rr_dist,
                 'tasks': rr_results
             }
@@ -449,10 +441,9 @@ def main():
     # Wait for initial status check
     time.sleep(5)
     
-    # Run experiment with 10-second submission intervals
-    # Each task runs for 10 seconds
-    # 20 tasks submitted with 10s interval between submissions
-    lb.run_experiment(num_tasks=20, task_duration=10, interval=10)
+    # Run experiment without submission intervals
+    # Tasks are assigned immediately to idle workers
+    lb.run_experiment(num_tasks=20, task_duration=10)
     
     # Stop monitoring
     lb.stop_monitoring()
