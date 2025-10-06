@@ -1,8 +1,7 @@
 # -*- coding:utf-8 -*-
 """
 CISC 6935 Distributed Systems - Lab 1
-Manager Node Implementation - Concurrent Task Scheduler
-Real-time monitoring and immediate task assignment
+Manager Node Implementation - Fixed Concurrent Scheduler
 """
 
 import pickle
@@ -14,9 +13,7 @@ import json
 from collections import deque
 
 class RPCProxy:
-    """
-    Proxy for making RPC calls to worker nodes
-    """
+    """Proxy for making RPC calls to worker nodes"""
     def __init__(self, connection):
         self._connection = connection
         self._lock = threading.Lock()
@@ -35,9 +32,7 @@ class RPCProxy:
         return do_rpc
 
 class WorkerProxy:
-    """
-    Represents a worker node with RPC connection and status tracking
-    """
+    """Represents a worker node with RPC connection and status tracking"""
     def __init__(self, worker_id, host, port=17000):
         self.worker_id = worker_id
         self.host = host
@@ -46,7 +41,7 @@ class WorkerProxy:
         self.last_status = None
         self.is_connected = False
         self._connection = None
-        self.current_task = None  # Track current task
+        self.current_task = None  # Manager-side tracking
         self.task_lock = threading.Lock()
         
     def connect(self):
@@ -62,16 +57,6 @@ class WorkerProxy:
             self.is_connected = False
             return False
     
-    def reconnect(self):
-        """Attempt to reconnect to worker"""
-        print(f"[Manager] Attempting to reconnect to worker {self.worker_id}...")
-        if self._connection:
-            try:
-                self._connection.close()
-            except:
-                pass
-        return self.connect()
-    
     def get_status(self):
         """Get current resource status from worker"""
         if not self.is_connected:
@@ -84,25 +69,15 @@ class WorkerProxy:
             self.is_connected = False
             return None
     
-    def is_idle(self):
-        """Check if worker is idle and available for new task"""
+    def is_busy(self):
+        """Check if worker is currently executing a task (manager-side tracking)"""
         with self.task_lock:
-            if self.current_task is not None:
-                return False
-        
-        status = self.get_status()
-        if status:
-            return status['is_idle']
-        return False
+            return self.current_task is not None
     
     def assign_task(self, task_params):
-        """Assign a task to this worker (non-blocking)"""
+        """Assign a task to this worker (blocking call)"""
         if not self.is_connected:
-            if not self.reconnect():
-                return {'status': 'error', 'error': 'not connected'}
-        
-        with self.task_lock:
-            self.current_task = task_params['task_id']
+            return {'status': 'error', 'error': 'not connected'}
         
         try:
             result = self.proxy.execute_task(task_params)
@@ -110,25 +85,18 @@ class WorkerProxy:
         except Exception as e:
             print(f"[Manager] Error assigning task to worker {self.worker_id}: {str(e)}")
             return {'status': 'error', 'error': str(e)}
-        finally:
-            with self.task_lock:
-                self.current_task = None
 
 class LoadBalancer:
-    """
-    Manages workers and implements concurrent load balancing
-    """
+    """Manages workers and implements concurrent load balancing"""
     def __init__(self, worker_configs):
         self.workers = []
         self.monitoring_active = False
         self.monitor_thread = None
-        self.monitor_interval = 2  # Check every 2 seconds
-        self.task_queue = deque()  # Queue of pending tasks
-        self.completed_tasks = []  # Completed task records
-        self.scheduler_active = False
-        self.scheduler_thread = None
-        self.queue_lock = threading.Lock()
+        self.monitor_interval = 2
+        self.completed_tasks = []
         self.results_lock = threading.Lock()
+        self.active_threads = []
+        self.threads_lock = threading.Lock()
         
         # Initialize workers
         for worker_id, host in worker_configs:
@@ -174,7 +142,7 @@ class LoadBalancer:
                     with worker.task_lock:
                         current = worker.current_task
                     
-                    # Clear status display
+                    # Clear status based on manager-side tracking
                     if current:
                         status_str = f"BUSY [{current}]"
                     else:
@@ -184,211 +152,198 @@ class LoadBalancer:
                 else:
                     print(f"Worker {worker.worker_id}: DISCONNECTED")
             
-            with self.queue_lock:
-                pending = len(self.task_queue)
             with self.results_lock:
                 completed = len(self.completed_tasks)
             
-            print(f"Tasks: {pending} pending | {completed} completed")
+            with self.threads_lock:
+                active = sum(1 for t in self.active_threads if t.is_alive())
+            
+            print(f"Tasks: {active} running | {completed} completed")
             print("-" * 70)
             time.sleep(self.monitor_interval)
     
-    def start_scheduler(self):
-        """Start the task scheduler"""
-        self.scheduler_active = True
-        self.scheduler_thread = threading.Thread(target=self._scheduler_loop)
-        self.scheduler_thread.daemon = True
-        self.scheduler_thread.start()
-        print("[Manager] Started task scheduler")
-    
-    def stop_scheduler(self):
-        """Stop the task scheduler"""
-        self.scheduler_active = False
-        if self.scheduler_thread:
-            self.scheduler_thread.join()
-    
-    def _scheduler_loop(self):
-        """
-        Continuously check for idle workers and assign tasks
-        This is the core of concurrent task execution
-        """
-        while self.scheduler_active:
-            # Check if there are pending tasks
-            with self.queue_lock:
-                if not self.task_queue:
-                    time.sleep(0.5)
-                    continue
-            
-            # Find idle workers
-            idle_workers = [w for w in self.workers if w.is_idle()]
-            
-            if idle_workers:
-                # Assign tasks to all idle workers
-                for worker in idle_workers:
-                    with self.queue_lock:
-                        if not self.task_queue:
-                            break
-                        task_info = self.task_queue.popleft()
-                    
-                    # Start task in separate thread
-                    t = threading.Thread(
-                        target=self._execute_task,
-                        args=(worker, task_info)
-                    )
-                    t.daemon = True
-                    t.start()
-            
-            time.sleep(0.5)  # Check every 0.5 seconds
-    
-    def _execute_task(self, worker, task_info):
+    def _execute_task(self, worker, task_id, duration, algorithm):
         """Execute a single task on a worker"""
-        task_id = task_info['task_id']
-        task_params = task_info['params']
-        algorithm = task_info['algorithm']
+        # Mark worker as busy
+        with worker.task_lock:
+            worker.current_task = task_id
         
-        print(f"\n[Scheduler] Assigning {task_id} to {worker.worker_id} ({algorithm})")
-        
-        start_time = time.time()
-        result = worker.assign_task(task_params)
-        end_time = time.time()
-        
-        # Record completion
-        record = {
-            'task_id': task_id,
-            'worker_id': worker.worker_id,
-            'worker_host': worker.host,
-            'algorithm': algorithm,
-            'start_time': start_time,
-            'end_time': end_time,
-            'duration': end_time - start_time,
-            'result': result
-        }
-        
-        with self.results_lock:
-            self.completed_tasks.append(record)
-        
-        if result.get('status') != 'error':
-            print(f"[Scheduler] {task_id} completed on {worker.worker_id} "
-                  f"in {end_time - start_time:.1f}s")
-        else:
-            print(f"[Scheduler] {task_id} FAILED on {worker.worker_id}")
-    
-    def select_worker_by_cpu(self):
-        """Select worker with lowest CPU usage"""
-        worker_loads = []
-        for worker in self.workers:
-            if worker.is_idle():
-                status = worker.get_status()
-                if status:
-                    worker_loads.append((worker, status['cpu_load']))
-        
-        if not worker_loads:
-            return None
-        
-        worker_loads.sort(key=lambda x: x[1])
-        return worker_loads[0][0]
-    
-    def enqueue_tasks(self, tasks, algorithm='cpu_based'):
-        """Add tasks to the queue"""
-        with self.queue_lock:
-            for task_id, duration in tasks:
-                task_info = {
-                    'task_id': task_id,
-                    'params': {'task_id': task_id, 'duration': duration},
-                    'algorithm': algorithm
-                }
-                self.task_queue.append(task_info)
-        print(f"[Manager] Enqueued {len(tasks)} tasks with {algorithm} algorithm")
-    
-    def wait_for_completion(self, expected_count):
-        """Wait until all tasks are completed"""
-        print(f"\n[Manager] Waiting for {expected_count} tasks to complete...")
-        while True:
+        try:
+            print(f"[Scheduler] Assigning {task_id} to {worker.worker_id} ({algorithm})")
+            
+            start_time = time.time()
+            task_params = {'task_id': task_id, 'duration': duration}
+            result = worker.assign_task(task_params)
+            end_time = time.time()
+            
+            # Record completion
+            record = {
+                'task_id': task_id,
+                'worker_id': worker.worker_id,
+                'worker_host': worker.host,
+                'algorithm': algorithm,
+                'start_time': start_time,
+                'end_time': end_time,
+                'duration': end_time - start_time,
+                'result': result
+            }
+            
             with self.results_lock:
-                completed = len(self.completed_tasks)
+                self.completed_tasks.append(record)
             
-            with self.queue_lock:
-                pending = len(self.task_queue)
-            
-            if completed >= expected_count and pending == 0:
-                # Wait a bit more to ensure all tasks are done
-                time.sleep(2)
-                break
-            
-            time.sleep(1)
+            if result.get('status') != 'error':
+                print(f"[Scheduler] {task_id} completed on {worker.worker_id} "
+                      f"in {end_time - start_time:.1f}s")
+            else:
+                print(f"[Scheduler] {task_id} FAILED on {worker.worker_id}")
         
-        print(f"[Manager] All {expected_count} tasks completed!")
+        finally:
+            # Mark worker as idle
+            with worker.task_lock:
+                worker.current_task = None
     
-    def run_experiment(self, num_tasks=20, task_duration=10):
+    def run_cpu_based(self, num_tasks, task_duration, interval=10):
         """
-        Run concurrent load balancing experiment
+        CPU-based load balancing: submit tasks with interval, assign to lowest CPU worker
+        """
+        print("\n### CPU-BASED LOAD BALANCING ###")
+        print(f"Submitting {num_tasks} tasks with {interval}s interval")
+        print("Strategy: Assign to worker with lowest CPU load at submission time\n")
+        
+        self.completed_tasks = []
+        threads = []
+        
+        for i in range(num_tasks):
+            task_id = f"CPU_TASK_{i+1}"
+            
+            # Find worker with lowest CPU load
+            best_worker = None
+            lowest_cpu = float('inf')
+            
+            for worker in self.workers:
+                if not worker.is_busy():
+                    status = worker.get_status()
+                    if status and status['cpu_load'] < lowest_cpu:
+                        lowest_cpu = status['cpu_load']
+                        best_worker = worker
+            
+            # If all workers busy, select one with lowest CPU anyway
+            if not best_worker:
+                for worker in self.workers:
+                    status = worker.get_status()
+                    if status and status['cpu_load'] < lowest_cpu:
+                        lowest_cpu = status['cpu_load']
+                        best_worker = worker
+            
+            if best_worker:
+                print(f"[Submit {i+1}/{num_tasks}] {task_id} -> {best_worker.worker_id} (CPU: {lowest_cpu:.4f})")
+                
+                # Start task in separate thread
+                t = threading.Thread(
+                    target=self._execute_task,
+                    args=(best_worker, task_id, task_duration, 'cpu_based')
+                )
+                t.daemon = True
+                t.start()
+                threads.append(t)
+                
+                with self.threads_lock:
+                    self.active_threads = threads
+            
+            # Wait interval before next submission (except last one)
+            if i < num_tasks - 1:
+                time.sleep(interval)
+        
+        # Wait for all tasks to complete
+        print(f"\n[Manager] Waiting for all {num_tasks} CPU-based tasks to complete...")
+        for t in threads:
+            t.join()
+        
+        return self.completed_tasks.copy()
+    
+    def run_round_robin(self, num_tasks, task_duration, interval=10):
+        """
+        Round-robin load balancing: submit tasks with interval, assign in round-robin order
+        """
+        print("\n### ROUND-ROBIN LOAD BALANCING ###")
+        print(f"Submitting {num_tasks} tasks with {interval}s interval")
+        print("Strategy: Assign to workers in sequential order\n")
+        
+        self.completed_tasks = []
+        threads = []
+        
+        for i in range(num_tasks):
+            task_id = f"RR_TASK_{i+1}"
+            
+            # Round-robin: cycle through workers
+            worker = self.workers[i % len(self.workers)]
+            
+            print(f"[Submit {i+1}/{num_tasks}] {task_id} -> {worker.worker_id} (round-robin)")
+            
+            # Start task in separate thread
+            t = threading.Thread(
+                target=self._execute_task,
+                args=(worker, task_id, task_duration, 'round_robin')
+            )
+            t.daemon = True
+            t.start()
+            threads.append(t)
+            
+            with self.threads_lock:
+                self.active_threads = threads
+            
+            # Wait interval before next submission (except last one)
+            if i < num_tasks - 1:
+                time.sleep(interval)
+        
+        # Wait for all tasks to complete
+        print(f"\n[Manager] Waiting for all {num_tasks} round-robin tasks to complete...")
+        for t in threads:
+            t.join()
+        
+        return self.completed_tasks.copy()
+    
+    def run_experiment(self, num_tasks=20, task_duration=10, interval=10):
+        """
+        Run load balancing experiment
         Args:
-            num_tasks: number of tasks to run (default 20)
+            num_tasks: number of tasks (default 20)
             task_duration: duration of each task in seconds (default 10)
+            interval: seconds between task submissions (default 10)
         """
         print("\n" + "="*70)
-        print("CONCURRENT LOAD BALANCING EXPERIMENT")
+        print("LOAD BALANCING EXPERIMENT")
         print("="*70)
         print(f"Total Tasks: {num_tasks}")
         print(f"Task Duration: {task_duration}s each")
+        print(f"Submission Interval: {interval}s")
         print(f"Workers: {len(self.workers)}")
-        print(f"Strategy: Assign tasks immediately when workers become idle")
         print("="*70 + "\n")
         
-        # Start scheduler for concurrent execution
-        self.start_scheduler()
-        
         # Test 1: CPU-based algorithm
-        print("\n### TEST 1: CPU-BASED LOAD BALANCING (Concurrent) ###\n")
-        self.completed_tasks = []
+        exp_start = time.time()
+        cpu_results = self.run_cpu_based(num_tasks, task_duration, interval)
+        cpu_duration = time.time() - exp_start
         
-        tasks = [(f"CPU_TASK_{i+1}", task_duration) for i in range(num_tasks)]
-        self.enqueue_tasks(tasks, algorithm='cpu_based')
-        
-        experiment_start = time.time()
-        self.wait_for_completion(num_tasks)
-        cpu_duration = time.time() - experiment_start
-        
-        cpu_results = self.completed_tasks.copy()
-        
-        print(f"\n[Result] CPU-based test completed in {cpu_duration:.1f}s")
-        print(f"  Theoretical minimum: {num_tasks * task_duration / len(self.workers):.1f}s")
-        print(f"  Efficiency: {(num_tasks * task_duration / len(self.workers) / cpu_duration * 100):.1f}%")
+        print(f"\n[Result] CPU-based completed in {cpu_duration:.1f}s\n")
         
         # Wait between tests
-        time.sleep(5)
+        print("Waiting 10s before next test...\n")
+        time.sleep(10)
         
-        # Test 2: Round-robin algorithm (for comparison)
-        print("\n### TEST 2: ROUND-ROBIN LOAD BALANCING (Concurrent) ###\n")
-        self.completed_tasks = []
+        # Test 2: Round-robin algorithm
+        exp_start = time.time()
+        rr_results = self.run_round_robin(num_tasks, task_duration, interval)
+        rr_duration = time.time() - exp_start
         
-        # For round-robin, we pre-assign workers
-        tasks_rr = []
-        for i in range(num_tasks):
-            task_id = f"RR_TASK_{i+1}"
-            # Pre-assign to worker based on round-robin
-            worker_idx = i % len(self.workers)
-            tasks_rr.append((task_id, task_duration))
-        
-        self.enqueue_tasks(tasks_rr, algorithm='round_robin')
-        
-        experiment_start = time.time()
-        self.wait_for_completion(num_tasks)
-        rr_duration = time.time() - experiment_start
-        
-        rr_results = self.completed_tasks.copy()
-        
-        print(f"\n[Result] Round-robin test completed in {rr_duration:.1f}s")
-        print(f"  Theoretical minimum: {num_tasks * task_duration / len(self.workers):.1f}s")
-        print(f"  Efficiency: {(num_tasks * task_duration / len(self.workers) / rr_duration * 100):.1f}%")
-        
-        # Stop scheduler
-        self.stop_scheduler()
+        print(f"\n[Result] Round-robin completed in {rr_duration:.1f}s\n")
         
         # Generate comparison report
-        self._generate_report(cpu_results, rr_results, cpu_duration, rr_duration)
+        self._generate_report(cpu_results, rr_results, cpu_duration, rr_duration, 
+                            num_tasks, task_duration, interval)
     
-    def _generate_report(self, cpu_results, rr_results, cpu_duration, rr_duration):
+    def _generate_report(self, cpu_results, rr_results, cpu_duration, rr_duration,
+                        num_tasks, task_duration, interval):
         """Generate detailed comparison report"""
         print("\n" + "="*70)
         print("EXPERIMENT RESULTS")
@@ -420,20 +375,24 @@ class LoadBalancer:
         
         # Performance comparison
         print("\n### Performance Comparison ###")
-        print(f"CPU-based: {cpu_duration:.1f}s")
-        print(f"Round-robin: {rr_duration:.1f}s")
-        speedup = ((rr_duration - cpu_duration) / rr_duration * 100)
-        if speedup > 0:
-            print(f"CPU-based is {speedup:.1f}% faster")
+        print(f"CPU-based total time: {cpu_duration:.1f}s")
+        print(f"Round-robin total time: {rr_duration:.1f}s")
+        
+        diff = cpu_duration - rr_duration
+        if abs(diff) < 1:
+            print(f"Performance is similar (difference: {abs(diff):.1f}s)")
+        elif diff > 0:
+            print(f"Round-robin is {diff:.1f}s faster ({diff/cpu_duration*100:.1f}% improvement)")
         else:
-            print(f"Round-robin is {-speedup:.1f}% faster")
+            print(f"CPU-based is {abs(diff):.1f}s faster ({abs(diff)/rr_duration*100:.1f}% improvement)")
         
         # Save detailed report
         report = {
             'experiment_info': {
-                'total_tasks': len(cpu_results),
-                'workers': len(self.workers),
-                'task_duration': 10
+                'total_tasks': num_tasks,
+                'task_duration': task_duration,
+                'submission_interval': interval,
+                'workers': len(self.workers)
             },
             'cpu_based': {
                 'duration': cpu_duration,
@@ -455,12 +414,12 @@ class LoadBalancer:
 
 def main():
     """Main function to run the manager"""
-    # Configure worker nodes (update with your actual IPs)
+    # Configure worker nodes
     worker_configs = [
-        ('worker1', '10.128.0.2'),  # node1
-        ('worker2', '10.128.0.3'),  # node2
-        ('worker3', '10.128.0.4'),  # node3
-        ('worker4', '10.128.0.6'),  # node4
+        ('worker1', '10.128.0.2'),
+        ('worker2', '10.128.0.3'),
+        ('worker3', '10.128.0.4'),
+        ('worker4', '10.128.0.6'),
     ]
     
     # Initialize load balancer
@@ -477,10 +436,10 @@ def main():
     # Wait for initial status check
     time.sleep(5)
     
-    # Run concurrent experiment
-    # 20 tasks, 10 seconds each
-    # With 4 workers, theoretical minimum time: 20*10/4 = 50 seconds
-    lb.run_experiment(num_tasks=20, task_duration=10)
+    # Run experiment with 10-second submission intervals
+    # Each task runs for 10 seconds
+    # 20 tasks submitted with 10s interval between submissions
+    lb.run_experiment(num_tasks=20, task_duration=10, interval=10)
     
     # Stop monitoring
     lb.stop_monitoring()
