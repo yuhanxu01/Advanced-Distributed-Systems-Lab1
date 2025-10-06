@@ -172,10 +172,15 @@ class LoadBalancer:
                 status = worker.get_status()
                 if status:
                     with worker.task_lock:
-                        task_info = f"Task: {worker.current_task}" if worker.current_task else "IDLE"
-                    idle_str = "IDLE" if status['is_idle'] else "BUSY"
-                    print(f"Worker {worker.worker_id}: CPU={status['cpu_load']:.4f} | "
-                          f"{idle_str} | {task_info}")
+                        current = worker.current_task
+                    
+                    # Clear status display
+                    if current:
+                        status_str = f"BUSY [{current}]"
+                    else:
+                        status_str = "IDLE"
+                    
+                    print(f"Worker {worker.worker_id}: CPU={status['cpu_load']:.4f} | {status_str}")
                 else:
                     print(f"Worker {worker.worker_id}: DISCONNECTED")
             
@@ -184,7 +189,7 @@ class LoadBalancer:
             with self.results_lock:
                 completed = len(self.completed_tasks)
             
-            print(f"Queue: {pending} pending | {completed} completed")
+            print(f"Tasks: {pending} pending | {completed} completed")
             print("-" * 70)
             time.sleep(self.monitor_interval)
     
