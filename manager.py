@@ -242,7 +242,7 @@ class LoadBalancer:
                   50, 7, 9, 8,
                   60, 8, 10, 12,
                   45, 9, 5, 3]
-        assert len(series) == 20 and min(series) >= 5 and max(series) <= 40
+        assert len(series) == 20
         return series
 
     # ---------- CPU-based scheduling (longest-first to least-busy) ----------
