@@ -236,16 +236,12 @@ class LoadBalancer:
     def build_fixed_series_20():
         """
         Adversarial RR order across 4 workers (i % 4):
-          W1 gets heavy: indices 0,4,8,12,16 -> 40,39,38,37,36
-          W2 gets light: indices 1,5,9,13,17 -> 5,6,7,8,9
-          W3 medium:     25,26,27,28,29
-          W4 med-high:   30,31,32,33,34
         """
-        series = [40, 5, 25, 30,
-                  39, 6, 26, 31,
-                  38, 7, 27, 32,
-                  37, 8, 28, 33,
-                  36, 9, 29, 34]
+        series = [70, 5, 7, 10,
+                  50, 6, 8, 1,
+                  50, 7, 9, 8,
+                  60, 8, 10, 12,
+                  45, 9, 5, 3]
         assert len(series) == 20 and min(series) >= 5 and max(series) <= 40
         return series
 
