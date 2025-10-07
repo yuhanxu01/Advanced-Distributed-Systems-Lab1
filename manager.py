@@ -4,10 +4,11 @@ CISC 6935 Distributed Systems - Lab 1
 Manager Node Implementation - Fixed Series Scheduler (Pi Computation)
 
 Changes:
-- Deterministic 5–40s task series (no randomness).
+- Deterministic 5–70s task series (no randomness).
 - Adversarial order for RR to show imbalance.
 - CPU-based scheduling picks longest-first to least-busy worker.
 - Fault tolerance: auto-retry and reassign on worker failure.
+- Interval = 10s, print launch timestamp.
 """
 
 import pickle
@@ -160,7 +161,6 @@ class LoadBalancer:
             return None
         idle = [w for w in candidates if not w.is_busy()]
         pool = idle if idle else candidates
-        # lower cpu_load preferred; missing status treated as high load
         return min(pool, key=lambda w: (w.last_status or {'cpu_load': 1.0})['cpu_load'])
 
     # ---------- task execution with retry ----------
@@ -198,7 +198,6 @@ class LoadBalancer:
             return True
         except Exception as e:
             print(f"[Scheduler] {task_id} failed on {worker.worker_id}: {e}")
-            # choose alternate and retry if possible
             task['retries'] += 1
             if task['retries'] >= self.MAX_RETRIES:
                 with self.results_lock:
@@ -219,13 +218,11 @@ class LoadBalancer:
             alt = self._choose_best_worker(exclude={worker})
             if not alt:
                 print("[Scheduler] No alternate worker available, will retry later")
-                # simple backoff then try any connected worker
                 time.sleep(1.0)
                 alt = self._choose_best_worker()
                 if not alt:
                     print("[Scheduler] Still no worker; push to background retry skipped (demo mode)")
                     return False
-            # retry on alternate in the same thread
             return self._execute_task(alt, task, algorithm)
         finally:
             with worker.task_lock:
@@ -234,26 +231,20 @@ class LoadBalancer:
     # ---------- fixed series ----------
     @staticmethod
     def build_fixed_series_20():
-        """
-        Adversarial RR order across 4 workers (i % 4):
-        """
         series = [70, 5, 7, 10,
-                  50, 6, 8, 1,
+                  70, 6, 8, 1,
                   50, 7, 9, 8,
                   60, 8, 10, 12,
                   45, 9, 5, 3]
         assert len(series) == 20
         return series
 
-    # ---------- CPU-based scheduling (longest-first to least-busy) ----------
-    def run_cpu_based(self, durations, interval=5):
+    # ---------- CPU-based scheduling ----------
+    def run_cpu_based(self, durations, interval=10):
         print("\n### CPU-BASED SCHEDULING (fixed series) ###")
         self.completed_tasks = []
         threads = []
-
-        # longest-first uses same multiset as RR
         pending = deque(sorted(durations, reverse=True))
-
         i = 0
         while pending:
             best = self._choose_best_worker()
@@ -261,32 +252,28 @@ class LoadBalancer:
                 print("[CPU] No connected workers. Waiting...")
                 time.sleep(1.0)
                 continue
-
             dur = pending.popleft()
             task = {'task_id': f"CPU_TASK_{i+1}_{dur}s", 'duration': dur, 'retries': 0}
+            ts = datetime.now().strftime("%H:%M:%S")
+            print(f"[{ts}] [CPU] Launch {task['task_id']} -> {best.worker_id}")
             t = threading.Thread(target=self._execute_task, args=(best, task, 'cpu_based'), daemon=True)
             t.start()
             threads.append(t)
-            print(f"[CPU] Launch {task['task_id']} -> {best.worker_id}")
             i += 1
             time.sleep(interval)
-
         print("\n[Manager] Waiting CPU-based tasks to finish...")
         for t in threads:
             t.join()
         return self.completed_tasks.copy()
 
-    # ---------- Round-robin scheduling (uses adversarial order) ----------
-    def run_round_robin(self, durations, interval=5):
+    # ---------- Round-robin scheduling ----------
+    def run_round_robin(self, durations, interval=10):
         print("\n### ROUND ROBIN SCHEDULING (fixed series adversarial order) ###")
         self.completed_tasks = []
         threads = []
-
         n_workers = len(self.workers)
         for i, dur in enumerate(durations):
-            # nominal RR target
             target = self.workers[i % n_workers]
-            # if target down, pick next connected to keep moving
             chosen = target if target.is_connected else self._choose_best_worker()
             if not chosen:
                 print("[RR] No connected workers. Waiting...")
@@ -295,14 +282,13 @@ class LoadBalancer:
                 if not chosen:
                     print("[RR] Skipping launch due to no workers")
                     continue
-
             task = {'task_id': f"RR_TASK_{i+1}_{dur}s", 'duration': dur, 'retries': 0}
+            ts = datetime.now().strftime("%H:%M:%S")
+            print(f"[{ts}] [RR] Launch {task['task_id']} -> {chosen.worker_id}")
             t = threading.Thread(target=self._execute_task, args=(chosen, task, 'round_robin'), daemon=True)
             t.start()
             threads.append(t)
-            print(f"[RR] Launch {task['task_id']} -> {chosen.worker_id}")
             time.sleep(interval)
-
         print("\n[Manager] Waiting RR tasks to finish...")
         for t in threads:
             t.join()
@@ -313,22 +299,17 @@ class LoadBalancer:
         print("\n" + "="*70)
         print("LOAD BALANCING EXPERIMENT - Fixed Task Series")
         print("="*70)
-
         series = self.build_fixed_series_20()
-
         exp_start = time.time()
-        cpu_results = self.run_cpu_based(series, interval=5)
+        cpu_results = self.run_cpu_based(series, interval=10)
         cpu_time = time.time() - exp_start
         print(f"\n[Result] CPU-based total time: {cpu_time:.1f}s\n")
-
         print("Pause 5s before Round-Robin...\n")
         time.sleep(5)
-
         exp_start = time.time()
-        rr_results = self.run_round_robin(series, interval=5)
+        rr_results = self.run_round_robin(series, interval=10)
         rr_time = time.time() - exp_start
         print(f"\n[Result] Round-Robin total time: {rr_time:.1f}s\n")
-
         self._generate_report(cpu_results, rr_results, cpu_time, rr_time)
 
     def _generate_report(self, cpu_results, rr_results, cpu_time, rr_time):
@@ -349,12 +330,10 @@ def main():
         ('worker3', '10.128.0.4'),
         ('worker4', '10.128.0.6'),
     ]
-
     lb = LoadBalancer(worker_configs)
     if not lb.connect_all_workers():
         print("[Manager] Failed to connect to workers.")
         return
-
     lb.start_monitoring()
     time.sleep(0.5)
     lb.run_experiment()
